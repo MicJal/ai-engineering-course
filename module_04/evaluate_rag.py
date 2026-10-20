@@ -28,7 +28,15 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 from gigachat import GigaChat
@@ -37,7 +45,7 @@ from sentence_transformers import SentenceTransformer
 import ingestion
 from qdrant_connect import make_client
 from vector_store import MODEL_NAME, load_manifest, search
-from rag_assistant import answer, format_context, REFUSAL_TEXT
+from rag_assistant import answer, format_context, REFUSAL_TEXT, ask_model
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "qdrant_chunks"
@@ -114,7 +122,26 @@ def classify(question: dict, hits, result: dict) -> str:
          (без учёта регистра), иначе -> generation_error
       5) Иначе -> ok
     """
-    # TODO 1: замени заглушку на реализацию по шагам выше
+    ans = result.get("answer", "").strip()
+    is_refusal = (ans == REFUSAL_TEXT) or (REFUSAL_TEXT in ans) or (result.get("refused_by") is not None)
+
+    if not question.get("in_corpus", True):
+        return "ok" if is_refusal else "hallucination"
+
+    if is_refusal:
+        return "over_refusal"
+
+    expected = question.get("expected", [])
+    expected_set = {e.removesuffix(".json") for e in expected} | set(expected)
+    sources_set = set(result.get("sources", []))
+
+    if not (expected_set & sources_set):
+        return "retrieval_error"
+
+    must_contain = question.get("must_contain", "").strip().lower()
+    if must_contain and must_contain not in ans.lower():
+        return "generation_error"
+
     return "ok"
 
 
@@ -136,14 +163,34 @@ def llm_judge(question: str, context: str, answer_text: str) -> dict:
       answer_relevance, context_relevance, answer_faithfulness,
       overall_verdict, reason
     """
-    # TODO 2: замени заглушку на реальный вызов судьи
-    return {
-        "answer_relevance": "low",
-        "context_relevance": "low",
-        "answer_faithfulness": "low",
-        "overall_verdict": "error",
-        "reason": "TODO 2: llm_judge не реализован",
-    }
+    try:
+        user_msg = (
+            f"ВОПРОС:\n{question}\n\n"
+            f"КОНТЕКСТ:\n{context}\n\n"
+            f"ОТВЕТ:\n{answer_text}"
+        )
+        messages = [
+            {"role": "system", "content": JUDGE_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ]
+        raw = ask_model(messages, max_tokens=700)
+
+        text = raw.strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end + 1]
+
+        data = json.loads(text)
+        return data
+    except Exception as e:
+        return {
+            "answer_relevance": "low",
+            "context_relevance": "low",
+            "answer_faithfulness": "low",
+            "overall_verdict": "error",
+            "reason": str(e),
+        }
 
 
 # ====================================================================
@@ -333,8 +380,18 @@ def sweep_chunking(client, model, alias: str):
     print(f"\n  {col} | {'чанков':>7} | {'✓ по разметке':>14} | {'✓ по судье':>10}")
     print("  " + _SEP[:72])
     original = (ingestion.CHUNK_SIZE, ingestion.OVERLAP)
-    # TODO 3: перебор здесь
-    ingestion.CHUNK_SIZE, ingestion.OVERLAP = original
+    try:
+        for size, overlap in CHUNK_COMBOS:
+            ingestion.CHUNK_SIZE = size
+            ingestion.OVERLAP = overlap
+            manifest, _ = ingestion.build_index(client, model)
+            counts = run_eval(client, model, alias, verbose=False)
+            markup_ok = sum(1 for r in counts["_rows"] if r["in_corpus"] and r["markup"] == "ok")
+            judge_ok = sum(1 for r in counts["_rows"] if r["in_corpus"] and r["judgment"].get("overall_verdict") == "ok")
+            print(f"  {size:>4} / {overlap:<19} | {manifest['chunks']:>7} | {f'{markup_ok} / {in_corpus_total}':>14} | {f'{judge_ok} / {in_corpus_total}':>10}")
+    finally:
+        ingestion.CHUNK_SIZE, ingestion.OVERLAP = original
+        ingestion.build_index(client, model)
 
 
 # ====================================================================
@@ -360,7 +417,31 @@ def resolve_conflicts(hits):
     (строки ГГГГ-ММ-ДД сравниваются как даты), остальные выбросить.
     Порядок и score оставшихся точек не менять.
     """
-    return hits
+    if not hits:
+        return hits
+
+    def get_base_id(doc_id: str) -> str:
+        if doc_id.endswith("-OLD"):
+            return doc_id[:-4]
+        return doc_id
+
+    max_date_by_base = {}
+    for h in hits:
+        doc_id = h.payload.get("doc_id", "")
+        base_id = get_base_id(doc_id)
+        d = h.payload.get("date") or ""
+        if base_id not in max_date_by_base or d > max_date_by_base[base_id]:
+            max_date_by_base[base_id] = d
+
+    filtered = []
+    for h in hits:
+        doc_id = h.payload.get("doc_id", "")
+        base_id = get_base_id(doc_id)
+        d = h.payload.get("date") or ""
+        if d >= max_date_by_base[base_id]:
+            filtered.append(h)
+
+    return filtered
 
 
 def demo_conflict(client, model, alias: str):
