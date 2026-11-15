@@ -1,0 +1,10 @@
+[
+  {
+    "id": "2170ff76",
+    "equipment_id": "BOIL-01",
+    "description": "трещина в смотровом люке котла BOIL-01",
+    "priority": "high",
+    "status": "open",
+    "created_at": "2026-11-15T10:20:20.002195+00:00"
+  }
+]

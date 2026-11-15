@@ -1,0 +1,5 @@
+{"timestamp": "2026-11-15T10:19:35.782956+00:00", "action": "get_equipment_status", "params": {"equipment_id": "CONV-09"}, "ok": true}
+{"timestamp": "2026-11-15T10:19:59.343752+00:00", "action": "get_equipment_status", "params": {"equipment_id": "COMP-02"}, "ok": true}
+{"timestamp": "2026-11-15T10:20:06.891001+00:00", "action": "get_equipment_status", "params": {"equipment_id": "GEN-77"}, "ok": false}
+{"timestamp": "2026-11-15T10:20:20.002724+00:00", "action": "create_incident", "params": {"equipment_id": "BOIL-01", "priority": "high", "role": "engineer"}, "ok": true}
+{"timestamp": "2026-11-15T10:20:56.060004+00:00", "action": "create_incident", "params": {"equipment_id": "PUMP-07", "priority": "medium", "role": "viewer"}, "ok": false}
